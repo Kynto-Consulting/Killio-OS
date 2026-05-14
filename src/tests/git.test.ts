@@ -1,0 +1,61 @@
+import { KillioKernel } from '../kernel.js';
+import { CacheProvider } from '../vfs/cache.provider.js';
+import assert from 'node:assert';
+
+async function testGitAndZip() {
+  console.log('🤖 Starting git and zip integration test...');
+  
+  const vfs = new CacheProvider('test-owner');
+  const kernel = new KillioKernel(vfs);
+  await kernel.boot();
+  await kernel.execute(['cd', '/home/agent']);
+
+  console.log('📦 Executing git init...');
+  let res = await kernel.execute(['git', 'init']);
+  console.log(res.output);
+  assert.strictEqual(res.exitCode, 0);
+
+  console.log('📦 Creating mock project files...');
+  await kernel.execute(['write_file', '/home/agent/index.js', 'console.log("hello world");']);
+  await kernel.execute(['write_file', '/home/agent/package.json', '{"name": "test"}']);
+
+  console.log('📦 Executing git status...');
+  res = await kernel.execute(['git', 'status']);
+  console.log(res.output);
+  assert.strictEqual(res.exitCode, 0);
+  assert.ok(res.output.includes('index.js'), 'Status should show index.js');
+
+  console.log('📦 Executing git add . ...');
+  res = await kernel.execute(['git', 'add', '.']);
+  console.log(res.output);
+  assert.strictEqual(res.exitCode, 0);
+
+  console.log('📦 Executing git commit...');
+  res = await kernel.execute(['git', 'commit', '-m', 'Initial commit']);
+  console.log(res.output);
+  assert.strictEqual(res.exitCode, 0);
+
+  console.log('📦 Executing git log...');
+  res = await kernel.execute(['git', 'log']);
+  console.log(res.output);
+  assert.strictEqual(res.exitCode, 0);
+  assert.ok(res.output.includes('Initial commit'), 'Log should show the commit message');
+
+  console.log('📦 Compressing project with zip...');
+  res = await kernel.execute(['zip', 'backup.zip', '/home/agent']);
+  console.log(res.output);
+  assert.strictEqual(res.exitCode, 0);
+
+  console.log('📦 Verifying zip file existence via ls...');
+  res = await kernel.execute(['ls', '/home/agent']);
+  console.log(res.output);
+  assert.strictEqual(res.exitCode, 0);
+  assert.ok(res.output.includes('backup.zip'), 'backup.zip should be listed in the directory');
+
+  console.log('✅ Git and Zip integration test passed successfully!');
+}
+
+testGitAndZip().catch(err => {
+  console.error('❌ Test failed:', err);
+  process.exit(1);
+});

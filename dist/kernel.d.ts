@@ -1,0 +1,56 @@
+import { type VFSProvider } from './vfs/provider.js';
+import { type CommandResult, type FSNode } from './types/index.js';
+export type CommandHandler = (args: string[], kernel: KillioKernel) => Promise<CommandResult>;
+export declare class KillioKernel {
+    private commands;
+    private cwd;
+    private env;
+    private history;
+    private currentUserId;
+    private currentGroupId;
+    private hostname;
+    private bootTime;
+    private vfs;
+    constructor(vfs: VFSProvider);
+    registerCommand(name: string, handler: CommandHandler): void;
+    boot(): Promise<void>;
+    private ensureDir;
+    private seedMockFile;
+    setHostname(name: string): Promise<void>;
+    readFile(path: string): Promise<string>;
+    writeFile(path: string, content: string, options?: {
+        isBinary?: boolean;
+        owner?: string;
+        permissions?: string;
+    }): Promise<void>;
+    mkdir(path: string, recursive?: boolean): Promise<void>;
+    unlink(path: string, recursive?: boolean): Promise<void>;
+    listNodes(path: string): Promise<FSNode[]>;
+    chmod(path: string, mode: string): Promise<void>;
+    stat(path: string): Promise<FSNode>;
+    chown(path: string, owner: string, group?: string): Promise<void>;
+    checkPermission(node: FSNode | null | undefined, access: 'r' | 'w' | 'x'): boolean;
+    expandVars(text: string): string;
+    execute(command: string | string[]): Promise<CommandResult>;
+    getBootTime(): number;
+    getHostname(): string;
+    setUser(userId: string): Promise<void>;
+    getCurrentUser(): string;
+    getVFS(): VFSProvider;
+    getCWD(): string;
+    setCWD(path: string): void;
+    getEnv(key: string): string | undefined;
+    setEnv(key: string, value: string): void;
+    getAllEnv(): Record<string, string>;
+    getHistory(): string[];
+    resolvePath(filepath: string): string;
+    private resolveCommand;
+    private executeCapability;
+    private readStringFromMemory;
+    private executeScript;
+    private seedSystemConfigs;
+    private seedInternalCapabilities;
+    private parseCommand;
+    private seedOMPThemes;
+}
+//# sourceMappingURL=kernel.d.ts.map

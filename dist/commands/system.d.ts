@@ -1,0 +1,27 @@
+import type { CommandHandler } from '../kernel.js';
+export declare const pwd: CommandHandler;
+export declare const cd: CommandHandler;
+export declare const env: CommandHandler;
+export declare const uname: CommandHandler;
+export declare const uptime: CommandHandler;
+export declare const help: CommandHandler;
+export declare const sh: CommandHandler;
+export declare const date: CommandHandler;
+export declare const ps: CommandHandler;
+export declare const free: CommandHandler;
+export declare const pacman: CommandHandler;
+export declare const df: CommandHandler;
+export declare const top: CommandHandler;
+export declare const ping: CommandHandler;
+export declare const ifconfig: CommandHandler;
+export declare const chmod: CommandHandler;
+export declare const chown: CommandHandler;
+export declare const npm: CommandHandler;
+export declare const kpm: CommandHandler;
+export declare const mount: CommandHandler;
+export declare const clear: CommandHandler;
+export declare const whoami: CommandHandler;
+export declare const hostname: CommandHandler;
+export declare const su: CommandHandler;
+export declare const sudo: CommandHandler;
+//# sourceMappingURL=system.d.ts.map
