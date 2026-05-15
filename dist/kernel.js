@@ -98,6 +98,7 @@ export class KillioKernel {
         this.setEnv('HOME', `/home/${this.currentUserId}`);
         this.setEnv('PATH', '/bin:/usr/bin');
         this.setEnv('HOSTNAME', this.hostname);
+        this.setEnv('ALIASES', 'cls=clear;');
         // Setup Mounts if not already setup
         if (!(this.vfs instanceof MountManager)) {
             const root = this.vfs;
@@ -328,7 +329,87 @@ export class KillioKernel {
     expandVars(text) {
         return text.replace(/\$([\w\d_$]+)/g, (_, name) => this.getEnv(name) || '');
     }
+    /**
+     * Pre-process bash heredoc syntax (`<< DELIMITER … DELIMITER`) before normal tokenisation.
+     *
+     * Handles all common variants:
+     *   cat > /tmp/file << 'EOF'    → writes heredoc body to file
+     *   cat >> /tmp/file << EOF     → appends heredoc body to file
+     *   cat << EOF                  → returns heredoc body as output
+     *   node << EOF                 → writes body to a temp file, executes it
+     *   <<- MARKER                  → same but strips leading tabs from each line
+     *
+     * Returns a CommandResult when the heredoc is fully handled, or `null` to
+     * fall through to the normal execution path.
+     */
+    async executeHeredoc(rawCommand) {
+        // Regex breakdown:
+        //   ([\s\S]*?)        → prefix (everything before <<, including optional redirect)
+        //   <<(-?)            → heredoc operator, optional strip flag
+        //   \s*['"]?(\w+)['"]?[ \t]*\n   → delimiter (quoted or bare), then newline
+        //   ([\s\S]*?)        → heredoc body (lazy)
+        //   \n[ \t]*\3[ \t]*  → closing delimiter on its own line
+        //   (?:[\s\S]*)?$     → anything after the closing delimiter
+        const re = /^([\s\S]*?)<<(-?)\s*['"]?(\w+)['"]?[ \t]*\n([\s\S]*?)\n[ \t]*\3[ \t]*(?:[\s\S]*)?$/;
+        const match = rawCommand.match(re);
+        if (!match)
+            return null;
+        const prefix = match[1] ?? '';
+        const stripFlag = match[2] ?? '';
+        const rawBody = match[4] ?? '';
+        const body = stripFlag === '-'
+            ? rawBody.split('\n').map((l) => l.replace(/^\t+/, '')).join('\n')
+            : rawBody;
+        const prefixClean = prefix.trimEnd();
+        // ── Redirect in prefix? (`> file` or `>> file`) ──────────────────────────
+        const redirMatch = prefixClean.match(/(.*?)\s*(>>?)\s*(\S+)\s*$/);
+        if (redirMatch) {
+            const op = redirMatch[2];
+            const targetFile = redirMatch[3];
+            const resolved = this.resolvePath(targetFile);
+            if (op === '>>') {
+                let existing = '';
+                try {
+                    existing = await this.readFile(resolved);
+                }
+                catch { /* file may not exist */ }
+                await this.writeFile(resolved, existing ? `${existing}\n${body}` : body);
+            }
+            else {
+                await this.writeFile(resolved, body);
+            }
+            return { output: '', exitCode: 0 };
+        }
+        // ── No redirect ───────────────────────────────────────────────────────────
+        const tokens = this.parseCommand(prefixClean);
+        const cmdName = (tokens[0] ?? '').toLowerCase();
+        // `cat <<` with no redirect just prints the heredoc body
+        if (!cmdName || cmdName === 'cat') {
+            return { output: body, exitCode: 0 };
+        }
+        // Script runners: write body to a temp file then execute it
+        if (['node', 'bash', 'sh', 'python', 'py'].includes(cmdName)) {
+            const ext = cmdName === 'node' ? 'js' : (cmdName === 'python' || cmdName === 'py') ? 'py' : 'sh';
+            const tmpPath = `/tmp/_hd_${Date.now()}.${ext}`;
+            await this.writeFile(tmpPath, body);
+            return this.execute([cmdName, tmpPath, ...tokens.slice(1)]);
+        }
+        // Fallback: pass content as the last positional argument
+        return this.execute([...tokens, body]);
+    }
     async execute(command) {
+        // ── Heredoc pre-processing ────────────────────────────────────────────────
+        if (typeof command === 'string' && command.includes('<<')) {
+            try {
+                const heredocResult = await this.executeHeredoc(command);
+                if (heredocResult !== null)
+                    return heredocResult;
+            }
+            catch (err) {
+                return { output: `heredoc error: ${err?.message ?? err}`, exitCode: 1 };
+            }
+        }
+        // ─────────────────────────────────────────────────────────────────────────
         const rawTokens = typeof command === 'string' ? this.parseCommand(command) : command;
         if (rawTokens.length === 0) {
             return { output: '', exitCode: 0 };
@@ -404,7 +485,22 @@ export class KillioKernel {
                 redirectFile = cmd[redirectIdx + 1];
                 cmd = cmd.slice(0, redirectIdx);
             }
-            const [cmdName, ...args] = cmd;
+            let [cmdName, ...args] = cmd;
+            // Alias expansion
+            const aliases = this.getEnv('ALIASES');
+            if (aliases && cmdName) {
+                const aliasList = aliases.split(';').filter(Boolean);
+                for (const entry of aliasList) {
+                    const [aliasName, ...cmdValueParts] = entry.split('=');
+                    const cmdValue = cmdValueParts.join('=');
+                    if (aliasName === cmdName) {
+                        const expanded = cmdValue.split(' ');
+                        cmdName = expanded[0];
+                        args = [...expanded.slice(1), ...args];
+                        break;
+                    }
+                }
+            }
             let handler = this.commands.get(cmdName);
             if (!handler) {
                 const resolved = await this.resolveCommand(cmdName);

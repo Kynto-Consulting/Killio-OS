@@ -31,6 +31,20 @@ export declare class KillioKernel {
     chown(path: string, owner: string, group?: string): Promise<void>;
     checkPermission(node: FSNode | null | undefined, access: 'r' | 'w' | 'x'): boolean;
     expandVars(text: string): string;
+    /**
+     * Pre-process bash heredoc syntax (`<< DELIMITER … DELIMITER`) before normal tokenisation.
+     *
+     * Handles all common variants:
+     *   cat > /tmp/file << 'EOF'    → writes heredoc body to file
+     *   cat >> /tmp/file << EOF     → appends heredoc body to file
+     *   cat << EOF                  → returns heredoc body as output
+     *   node << EOF                 → writes body to a temp file, executes it
+     *   <<- MARKER                  → same but strips leading tabs from each line
+     *
+     * Returns a CommandResult when the heredoc is fully handled, or `null` to
+     * fall through to the normal execution path.
+     */
+    private executeHeredoc;
     execute(command: string | string[]): Promise<CommandResult>;
     getBootTime(): number;
     getHostname(): string;

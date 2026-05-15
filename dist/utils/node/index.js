@@ -14,10 +14,75 @@ import * as zlibMock from 'zlib';
 import AdmZip from 'adm-zip';
 import { createRequire } from 'module';
 const requireHost = createRequire(import.meta.url);
-const docx = requireHost('docx');
-const { marked } = requireHost('marked');
-const PDFDocument = requireHost('pdfkit');
-const QuickChart = requireHost('quickchart-js');
+// Lazy-loaded modules to avoid crashes if they are missing in the host environment (e.g. Serverless)
+let docx;
+let marked;
+let PDFDocument;
+let QuickChart;
+const getDocx = () => {
+    if (!docx) {
+        try {
+            docx = requireHost('docx');
+        }
+        catch (e) {
+            try {
+                docx = requireHost('../../node_modules/docx');
+            }
+            catch (e2) { }
+        }
+        if (!docx)
+            console.warn('[Killio-OS] docx module not found. Document generation will be disabled.');
+    }
+    return docx;
+};
+const getMarked = () => {
+    if (!marked) {
+        try {
+            marked = requireHost('marked').marked;
+        }
+        catch (e) {
+            try {
+                marked = requireHost('../../node_modules/marked').marked;
+            }
+            catch (e2) { }
+        }
+        if (!marked)
+            console.warn('[Killio-OS] marked module not found. Markdown parsing will be limited.');
+    }
+    return marked;
+};
+const getPdfKit = () => {
+    if (!PDFDocument) {
+        try {
+            PDFDocument = requireHost('pdfkit');
+        }
+        catch (e) {
+            try {
+                PDFDocument = requireHost('../../node_modules/pdfkit');
+            }
+            catch (e2) { }
+        }
+        if (!PDFDocument)
+            console.warn('[Killio-OS] pdfkit module not found. PDF generation will be disabled.');
+    }
+    return PDFDocument;
+};
+const getQuickChart = () => {
+    if (!QuickChart) {
+        try {
+            QuickChart = requireHost('quickchart-js');
+        }
+        catch (e) {
+            try {
+                QuickChart = requireHost('../../node_modules/quickchart-js');
+            }
+            catch (e2) { }
+        }
+        if (!QuickChart)
+            console.warn('[Killio-OS] quickchart-js module not found. Chart generation will be disabled.');
+    }
+    return QuickChart;
+};
 export const createNodeEnvironment = (kernel) => {
     let logOutput = "";
     const safeConsole = {
@@ -76,13 +141,13 @@ export const createNodeEnvironment = (kernel) => {
         if (modulePath === 'adm-zip')
             return AdmZip;
         if (modulePath === 'docx')
-            return docx;
+            return getDocx();
         if (modulePath === 'marked')
-            return { marked };
+            return { marked: getMarked() };
         if (modulePath === 'pdfkit')
-            return PDFDocument;
+            return getPdfKit();
         if (modulePath === 'quickchart-js')
-            return QuickChart;
+            return getQuickChart();
         // For VFS modules, we still need to be async
         return (async () => {
             let resolvedPath = modulePath;
