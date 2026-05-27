@@ -18,7 +18,7 @@
   "description": "",
   "devDependencies": {
     "@types/adm-zip": "^0.5.8",
-    "@types/node": "^25.7.0",
+    "@types/node": "^22.13.10",
     "@types/uuid": "^10.0.0",
     "ts-node": "^10.9.2",
     "tsx": "^4.21.0",
