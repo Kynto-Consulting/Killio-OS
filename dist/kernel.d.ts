@@ -10,10 +10,25 @@ export declare class KillioKernel {
     private currentGroupId;
     private hostname;
     private bootTime;
+    /** True when /tmp is an in-memory mount (default); false = persistent /tmp. */
+    private _ephemeralTmp;
     private vfs;
     constructor(vfs: VFSProvider);
     registerCommand(name: string, handler: CommandHandler): void;
-    boot(): Promise<void>;
+    /**
+     * Boot the kernel.
+     *
+     * @param opts.ephemeralTmp  When true (default) `/tmp` is mounted to an
+     *   in-memory CacheProvider — fine for a single long-lived process (CLI).
+     *   In a SERVERLESS host (e.g. Vercel) each invocation can land on a fresh
+     *   instance, so an in-memory `/tmp` is wiped between tool calls and files
+     *   written by one call vanish before the next reads them. Pass `false` to
+     *   keep `/tmp` on the persistent root provider so write→execute→read/upload
+     *   chain across calls.
+     */
+    boot(opts?: {
+        ephemeralTmp?: boolean;
+    }): Promise<void>;
     private ensureDir;
     private seedMockFile;
     setHostname(name: string): Promise<void>;

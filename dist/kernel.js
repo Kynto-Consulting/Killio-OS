@@ -18,6 +18,8 @@ export class KillioKernel {
     currentGroupId = 'agent';
     hostname = 'killio-os';
     bootTime = Date.now();
+    /** True when /tmp is an in-memory mount (default); false = persistent /tmp. */
+    _ephemeralTmp = true;
     vfs;
     constructor(vfs) {
         this.vfs = vfs;
@@ -30,7 +32,20 @@ export class KillioKernel {
     registerCommand(name, handler) {
         this.commands.set(name, handler);
     }
-    async boot() {
+    /**
+     * Boot the kernel.
+     *
+     * @param opts.ephemeralTmp  When true (default) `/tmp` is mounted to an
+     *   in-memory CacheProvider — fine for a single long-lived process (CLI).
+     *   In a SERVERLESS host (e.g. Vercel) each invocation can land on a fresh
+     *   instance, so an in-memory `/tmp` is wiped between tool calls and files
+     *   written by one call vanish before the next reads them. Pass `false` to
+     *   keep `/tmp` on the persistent root provider so write→execute→read/upload
+     *   chain across calls.
+     */
+    async boot(opts = {}) {
+        const ephemeralTmp = opts.ephemeralTmp ?? true;
+        this._ephemeralTmp = ephemeralTmp;
         // Register builtin commands
         this.registerCommand('ls', builtin.ls);
         this.registerCommand('mkdir', builtin.mkdir);
@@ -99,11 +114,16 @@ export class KillioKernel {
         this.setEnv('PATH', '/bin:/usr/bin');
         this.setEnv('HOSTNAME', this.hostname);
         this.setEnv('ALIASES', 'cls=clear;');
-        // Setup Mounts if not already setup
+        // Setup Mounts if not already setup. `/tmp` is mounted to an in-memory
+        // CacheProvider ONLY when ephemeralTmp is on — on serverless the caller
+        // passes ephemeralTmp:false so /tmp stays on the persistent root provider
+        // and files survive across invocations.
         if (!(this.vfs instanceof MountManager)) {
             const root = this.vfs;
             const manager = new MountManager(root);
-            manager.mount('/tmp', new CacheProvider(root.getOwnerId()));
+            if (ephemeralTmp) {
+                manager.mount('/tmp', new CacheProvider(root.getOwnerId()));
+            }
             this.vfs = manager;
         }
         // Ensure basic structure exists
