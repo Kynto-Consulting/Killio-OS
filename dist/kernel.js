@@ -51,6 +51,11 @@ export class KillioKernel {
         this.registerCommand('mkdir', builtin.mkdir);
         this.registerCommand('write_file', builtin.write_file);
         this.registerCommand('cat', builtin.cat);
+        // `read_file` is the canonical name callers (e.g. the agent os.tools layer)
+        // use to read VFS files; without it read_file/edit_file silently returned
+        // "command not found" (exit 127) and the agent could write but never read
+        // back. Alias it to the same handler as `cat`.
+        this.registerCommand('read_file', builtin.cat);
         this.registerCommand('pwd', builtin.pwd);
         this.registerCommand('cd', builtin.cd);
         this.registerCommand('env', builtin.env);
@@ -437,12 +442,40 @@ export class KillioKernel {
         // Glob expansion (*)
         const fullCommand = [];
         for (const token of rawTokens) {
-            if (token.includes('*') && !token.startsWith('$')) {
+            // Guard against undefined/non-string tokens. Callers (e.g. the backend
+            // os.tools wrappers) sometimes build arg arrays like ['mv', src, dest]
+            // where the model omitted an arg, leaving an `undefined` token. Calling
+            // `undefined.includes('*')` here threw "Cannot read properties of
+            // undefined (reading 'includes')" and crashed the whole command. Skip
+            // such tokens instead so the underlying command surfaces a clean error.
+            if (typeof token !== 'string') {
+                continue;
+            }
+            // Only treat a token as a glob if it looks like a single path segment.
+            // Data arguments (e.g. the body passed to `write_file`) routinely contain
+            // `*` together with regex-special chars and newlines; feeding those into
+            // `new RegExp` built an unanchored, invalid pattern and crashed the whole
+            // kernel (e.g. "Unmatched ')'" on Python source with `(...)*`). Skip such
+            // tokens, and fully escape the rest so construction can never throw.
+            const isGlobCandidate = token.includes('*') &&
+                !token.startsWith('$') &&
+                !/\s/.test(token) &&
+                token.length <= 256;
+            if (isGlobCandidate) {
                 const nodes = await this.vfs.listNodes(this.cwd);
-                const pattern = new RegExp('^' + token.replace(/\./g, '\\.').replace(/\*/g, '.*') + '$');
-                const matches = nodes
-                    .map(n => n.path.split('/').pop())
-                    .filter(name => name.match(pattern));
+                const regexSrc = '^' +
+                    token.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') +
+                    '$';
+                let matches = [];
+                try {
+                    const pattern = new RegExp(regexSrc);
+                    matches = nodes
+                        .map(n => n.path.split('/').pop())
+                        .filter(name => name.match(pattern));
+                }
+                catch {
+                    matches = [];
+                }
                 if (matches.length > 0) {
                     fullCommand.push(...matches.sort());
                 }
@@ -525,7 +558,13 @@ export class KillioKernel {
             if (!handler) {
                 const resolved = await this.resolveCommand(cmdName);
                 if (resolved) {
-                    const result = resolved.type === 'capability'
+                    // Capability binaries (python/py/pip, wasm tools) are seeded as
+                    // regular file nodes carrying metadata.capabilityType; older code
+                    // only routed when node.type === 'capability', which auto-installed
+                    // bins never are — so python/pip silently ran as empty shell scripts.
+                    const isCapability = resolved.type === 'capability'
+                        || !!resolved.metadata?.capabilityType;
+                    const result = isCapability
                         ? await this.executeCapability(resolved, args)
                         : await this.executeScript(resolved, args);
                     lastResult = result || { output: 'Internal execution error', exitCode: 1 };
