@@ -6,3 +6,12 @@ dist/
 *.env
 
 .npmrc
+
+# Academic paper workspace (not part of the software package)
+tesis/
+
+# AI assistant config / references
+.claude/
+**/.claude/
+CLAUDE.md
+**/CLAUDE.md

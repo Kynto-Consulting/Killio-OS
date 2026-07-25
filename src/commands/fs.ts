@@ -28,6 +28,68 @@ function formatLong(n: FSNode, nameOverride?: string): string {
   return `${mode} 1 ${owner.padEnd(8)} ${group.padEnd(8)} ${size} ${month} ${day} ${time} ${displayName}`;
 }
 
+/**
+ * `find` — recursive VFS enumeration with machine-readable output: one absolute
+ * path per line, no color codes, no section headers. This is the reliable way
+ * for callers (workspace persistence, agent tooling) to discover files, because
+ * `ls -R` output is human-formatted (chalk colors on directories, space-joined
+ * names) and cannot be parsed robustly.
+ *
+ * Supports the common subset:  find [path] [-type f|d] [-name GLOB] [-maxdepth N]
+ * Defaults to the current directory and prints the starting path first, POSIX-style.
+ */
+export const find: CommandHandler = async (args: string[], kernel) => {
+  let start = '.';
+  let typeFilter: 'f' | 'd' | null = null;
+  let nameGlob: RegExp | null = null;
+  let maxDepth = Infinity;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '-type') { const v = args[++i]; typeFilter = v === 'd' ? 'd' : v === 'f' ? 'f' : null; }
+    else if (a === '-name') {
+      const g = args[++i] || '*';
+      const re = g.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
+      nameGlob = new RegExp(`^${re}$`);
+    }
+    else if (a === '-maxdepth') { maxDepth = parseInt(args[++i] || '0', 10); }
+    else if (!a.startsWith('-')) { start = a; }
+  }
+
+  const root = kernel.resolvePath(start);
+  const lines: string[] = [];
+  const emit = (path: string, type: FSNode['type']) => {
+    if (typeFilter === 'f' && type !== 'file') return;
+    if (typeFilter === 'd' && type !== 'directory') return;
+    if (nameGlob) {
+      const base = path.split('/').pop() || path;
+      if (!nameGlob.test(base)) return;
+    }
+    lines.push(path);
+  };
+
+  const startNode = await kernel.getVFS().getNode(root);
+  if (!startNode) return { output: `find: '${start}': No such file or directory`, exitCode: 1 };
+  emit(root, startNode.type);
+
+  const walk = async (dir: string, depth: number): Promise<void> => {
+    if (depth >= maxDepth) return;
+    let children: FSNode[];
+    try { children = await kernel.listNodes(dir); } catch { return; }
+    // stable order so callers get deterministic listings
+    children.sort((a, b) => a.path.localeCompare(b.path));
+    for (const child of children) {
+      const base = child.path.split('/').pop() || '';
+      if (base === '.' || base === '..') continue;
+      emit(child.path, child.type);
+      if (child.type === 'directory') await walk(child.path, depth + 1);
+    }
+  };
+  if (startNode.type === 'directory') await walk(root, 0);
+
+  return { output: lines.join('\n'), exitCode: 0 };
+};
+
 export const ls: CommandHandler = async (args: string[], kernel) => {
   const flags = {
     a: args.some(a => a.startsWith('-') && a.includes('a')),
@@ -135,32 +197,49 @@ export const write_file: CommandHandler = async (args: string[], kernel) => {
   const content = contentParts.join(' ');
 
   try {
+    const existed = !!(await kernel.getVFS().getNode(kernel.resolvePath(path!)));
     await kernel.writeFile(path!, content, { isBinary: isBase64 });
-    return { output: '', exitCode: 0 };
+    return { output: `${existed ? 'Updated file' : 'Wrote to file'}: ${path}`, exitCode: 0 };
   } catch (e: any) {
     return { output: `write_file: ${e.message}`, exitCode: 1 };
   }
 };
 
-export const cat: CommandHandler = async (args: string[], kernel) => {
-  const showLineNumbers = args.includes('-n');
-  const files = args.filter(a => a !== '-n');
+export const cat: CommandHandler = async (args: string[], kernel, stdin?: string) => {
+  const flags = args.filter(a => a.startsWith('-') && a.length > 1);
+  const number = flags.some(f => f.includes('n'));
+  const numberNonBlank = flags.some(f => f.includes('b'));
+  const showEnds = flags.some(f => f.includes('E')) || flags.some(f => f === '-A');
+  const squeeze = flags.some(f => f.includes('s'));
+  const files = args.filter(a => !(a.startsWith('-') && a.length > 1));
 
-  if (files.length === 0) return { output: 'cat: missing operand', exitCode: 1 };
-  
-  let output = '';
-  try {
+  // No file operands (or `-`): read stdin, echoing it through (POSIX cat).
+  const bodies: string[] = [];
+  let err = false;
+  if (files.length === 0) {
+    bodies.push(stdin ?? '');
+  } else {
     for (const file of files) {
-      let content = await kernel.readFile(file!);
-      if (showLineNumbers) {
-        content = content.split('\n').map((line, i) => `${(i + 1).toString().padStart(6)}  ${line}`).join('\n');
-      }
-      output += content + (files.length > 1 ? '\n' : '');
+      if (file === '-') { bodies.push(stdin ?? ''); continue; }
+      try { bodies.push(await kernel.readFile(file!)); }
+      catch (e: any) { bodies.push(`\0ERR${e.message}`); err = true; }
     }
-    return { output, exitCode: 0 };
-  } catch (e: any) {
-    return { output: `cat: ${e.message}`, exitCode: 1 };
   }
+
+  let joined = bodies.map(b => (b.startsWith('\0ERR') ? '' : b)).join('');
+  const errMsgs = bodies.filter(b => b.startsWith('\0ERR')).map(b => `cat: ${b.slice(4)}`);
+
+  if (squeeze) joined = joined.replace(/\n{3,}/g, '\n\n');
+  if (showEnds) joined = joined.split('\n').map(l => l + '$').join('\n');
+  if (number || numberNonBlank) {
+    let n = 0;
+    joined = joined.split('\n').map((line) => {
+      if (numberNonBlank && line.trim() === '') return line;
+      return `${(++n).toString().padStart(6)}\t${line}`;
+    }).join('\n');
+  }
+  const out = [joined, ...errMsgs].filter(Boolean).join('\n');
+  return { output: out, exitCode: err ? 1 : 0 };
 };
 
 export const nano: CommandHandler = async (args: string[], kernel) => {
@@ -233,9 +312,11 @@ export const stat: CommandHandler = async (args: string[], kernel) => {
     const node = await kernel.getVFS().getNode(fullPath);
     if (!node) return { output: `stat: cannot stat '${args[0]}': No such file or directory`, exitCode: 1 };
 
+    const typeLabel = node.type === 'directory' ? 'directory' : node.type === 'link' ? 'symbolic link' : 'file';
     const output = [
       `  File: ${args[0]}`,
-      `  Size: ${node.metadata?.size || 0} \tBlocks: 8 \tIO Block: 4096 \t${node.type}`,
+      `  Type: ${typeLabel}`,
+      `  Size: ${node.metadata?.size || (node.content?.length ?? 0)} \tBlocks: 8 \tIO Block: 4096 \t${typeLabel}`,
       `Device: 1h/1d\tInode: ${node.id.substring(0, 8)}\tLinks: 1`,
       `Access: (${node.metadata?.permissions || '0644'}/${parsePerms(node.metadata?.permissions || '644')})  Uid: ( 0/    root)   Gid: ( 0/    root)`,
       `Access: ${node.metadata?.created || 'Unknown'}`,
@@ -288,41 +369,51 @@ export const patch: CommandHandler = async (args: string[], kernel) => {
   }
 };
 
-export const head: CommandHandler = async (args: string[], kernel) => {
-  if (!args[0]) return { output: 'head: missing operand', exitCode: 1 };
-  let n = 10;
-  let filePath = args[0];
-
-  if (args[0] === '-n' && args[1]) {
-    n = parseInt(args[1]);
-    filePath = args[2] || '';
+/** Shared parse for head/tail: -n N, -nN, -c N (bytes), file operand or stdin. */
+function parseHeadTail(args: string[]): { n: number; bytes: boolean; files: string[] } {
+  let n = 10, bytes = false;
+  const files: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '-n') { n = parseInt(args[++i] || '10', 10); }
+    else if (a === '-c') { n = parseInt(args[++i] || '10', 10); bytes = true; }
+    else if (/^-n\d+$/.test(a)) { n = parseInt(a.slice(2), 10); }
+    else if (/^-c\d+$/.test(a)) { n = parseInt(a.slice(2), 10); bytes = true; }
+    else if (/^-\d+$/.test(a)) { n = parseInt(a.slice(1), 10); }
+    else if (!a.startsWith('-')) files.push(a);
   }
+  return { n, bytes, files };
+}
 
-  const path = kernel.resolvePath(filePath);
-  const node = await kernel.getVFS().getNode(path);
-  if (!node || node.type !== 'file') return { output: `head: ${filePath}: No such file`, exitCode: 1 };
-  if (!kernel.checkPermission(node, 'r')) return { output: `head: ${filePath}: Permission denied`, exitCode: 1 };
-
-  const lines = (node.content || '').split('\n');
-  return { output: lines.slice(0, n).join('\n'), exitCode: 0 };
+export const head: CommandHandler = async (args: string[], kernel, stdin?: string) => {
+  const { n, bytes, files } = parseHeadTail(args);
+  const content = files.length
+    ? await (async () => {
+        const node = await kernel.getVFS().getNode(kernel.resolvePath(files[0]!));
+        if (!node || node.type !== 'file') throw new Error(`${files[0]}: No such file or directory`);
+        return node.content || '';
+      })().catch((e) => { throw e; })
+    : (stdin ?? '');
+  try {
+    const body = await Promise.resolve(content);
+    if (bytes) return { output: body.slice(0, n), exitCode: 0 };
+    return { output: body.split('\n').slice(0, n).join('\n'), exitCode: 0 };
+  } catch (e: any) { return { output: `head: ${e.message}`, exitCode: 1 }; }
 };
 
-export const tail: CommandHandler = async (args: string[], kernel) => {
-  if (!args[0]) return { output: 'tail: missing operand', exitCode: 1 };
-  let n = 10;
-  let filePath = args[0];
-
-  if (args[0] === '-n' && args[1]) {
-    n = parseInt(args[1]);
-    filePath = args[2] || '';
-  }
-
-  const path = kernel.resolvePath(filePath);
-  const node = await kernel.getVFS().getNode(path);
-  if (!node || node.type !== 'file') return { output: `tail: ${filePath}: No such file`, exitCode: 1 };
-  if (!kernel.checkPermission(node, 'r')) return { output: `tail: ${filePath}: Permission denied`, exitCode: 1 };
-
-  const lines = (node.content || '').split('\n');
-  return { output: lines.slice(-n).join('\n'), exitCode: 0 };
+export const tail: CommandHandler = async (args: string[], kernel, stdin?: string) => {
+  const { n, bytes, files } = parseHeadTail(args);
+  try {
+    let body: string;
+    if (files.length) {
+      const node = await kernel.getVFS().getNode(kernel.resolvePath(files[0]!));
+      if (!node || node.type !== 'file') return { output: `tail: ${files[0]}: No such file or directory`, exitCode: 1 };
+      body = node.content || '';
+    } else body = stdin ?? '';
+    if (bytes) return { output: body.slice(-n), exitCode: 0 };
+    let lines = body.split('\n');
+    if (lines.length && lines[lines.length - 1] === '') lines = lines.slice(0, -1);
+    return { output: lines.slice(-n).join('\n'), exitCode: 0 };
+  } catch (e: any) { return { output: `tail: ${e.message}`, exitCode: 1 }; }
 };
 

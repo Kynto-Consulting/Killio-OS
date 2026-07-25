@@ -41,5 +41,6 @@
     "moduleDetection": "force",
     "skipLibCheck": true
   },
-  "exclude": ["dist", "node_modules", "test-git.ts", "verify-os.ts"]
+  "include": ["src/**/*"],
+  "exclude": ["dist", "node_modules", "test-git.ts", "verify-os.ts", "tesis"]
 }

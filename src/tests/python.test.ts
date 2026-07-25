@@ -17,7 +17,7 @@ async function testPythonFullFlow() {
   await kernel.boot();
 
   console.log('1. Testing pip install (ephemeral site-packages in /tmp)...');
-  const pipResult = await kernel.execute(['pip', 'install', 'colorama']);
+  const pipResult = await kernel.execute(['pip', 'install', 'six']);
   console.log('Pip Output:', pipResult.output);
   
   if (pipResult.exitCode !== 0) {
@@ -28,12 +28,12 @@ async function testPythonFullFlow() {
   console.log('\n2. Testing library import and persistent VFS write...');
   const scriptPath = '/home/agent/lib_test.py';
   const pyCode = `
-import colorama
+import six
 import os
 
-print(f"Python: colorama location: {colorama.__file__}")
+print(f"Python: six location: {six.__file__}")
 
-result_msg = f"Colorama verified"
+result_msg = f"Six verified"
 with open("pip_result.txt", "w") as f:
     f.write(result_msg)
 
@@ -55,7 +55,7 @@ print("Python: Successfully wrote pip_result.txt to VFS")
   try {
     const content = await kernel.readFile('/home/agent/pip_result.txt');
     console.log(`VFS Content: "${content}"`);
-    if (content.startsWith('Colorama verified')) {
+    if (content.startsWith('Six verified')) {
       console.log('✅ SUCCESS: Library was installed and used correctly!');
     } else {
       console.error('❌ FAILURE: Content mismatch in VFS');

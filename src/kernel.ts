@@ -10,9 +10,8 @@ import { fileURLToPath, pathToFileURL } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-const NOOP_HANDLER: CommandHandler = async () => ({ output: '', exitCode: 0 });
 
-export type CommandHandler = (args: string[], kernel: KillioKernel) => Promise<CommandResult>;
+export type CommandHandler = (args: string[], kernel: KillioKernel, stdin?: string) => Promise<CommandResult>;
 
 export class KillioKernel {
   private commands: Map<string, CommandHandler> = new Map();
@@ -57,6 +56,39 @@ export class KillioKernel {
     this._ephemeralTmp = ephemeralTmp;
     // Register builtin commands
     this.registerCommand('ls', builtin.ls);
+    this.registerCommand('find', builtin.find);
+    // coreutils
+    this.registerCommand('wc', builtin.wc);
+    this.registerCommand('sort', builtin.sort);
+    this.registerCommand('uniq', builtin.uniq);
+    this.registerCommand('cut', builtin.cut);
+    this.registerCommand('tr', builtin.tr);
+    this.registerCommand('tee', builtin.tee);
+    this.registerCommand('rev', builtin.rev);
+    this.registerCommand('tac', builtin.tac);
+    this.registerCommand('nl', builtin.nl);
+    this.registerCommand('basename', builtin.basename);
+    this.registerCommand('dirname', builtin.dirname);
+    this.registerCommand('realpath', builtin.realpath);
+    this.registerCommand('which', builtin.which);
+    this.registerCommand('seq', builtin.seq);
+    this.registerCommand('yes', builtin.yes);
+    this.registerCommand('sleep', builtin.sleep);
+    this.registerCommand('printf', builtin.printf);
+    this.registerCommand('true', builtin.truecmd);
+    this.registerCommand('false', builtin.falsecmd);
+    this.registerCommand('test', builtin.test);
+    this.registerCommand('[', builtin.test);
+    this.registerCommand('expr', builtin.expr);
+    this.registerCommand('md5sum', builtin.md5sum);
+    this.registerCommand('sha1sum', builtin.sha1sum);
+    this.registerCommand('sha256sum', builtin.sha256sum);
+    this.registerCommand('ln', builtin.ln);
+    this.registerCommand('diff', builtin.diff);
+    this.registerCommand('cmp', builtin.cmp);
+    this.registerCommand('du', builtin.du);
+    this.registerCommand('tree', builtin.tree);
+    this.registerCommand('paste', builtin.paste);
     this.registerCommand('mkdir', builtin.mkdir);
     this.registerCommand('write_file', builtin.write_file);
     this.registerCommand('cat', builtin.cat);
@@ -566,64 +598,32 @@ export class KillioKernel {
         cmd = cmd.slice(0, redirectIdx);
       }
 
-      let [cmdName, ...args] = cmd;
-
-      // Alias expansion
-      const aliases = this.getEnv('ALIASES');
-      if (aliases && cmdName) {
-        const aliasList = aliases.split(';').filter(Boolean);
-        for (const entry of aliasList) {
-          const [aliasName, ...cmdValueParts] = entry.split('=');
-          const cmdValue = cmdValueParts.join('=');
-          if (aliasName === cmdName) {
-            const expanded = cmdValue.split(' ');
-            cmdName = expanded[0]!;
-            args = [...expanded.slice(1), ...args];
-            break;
-          }
-        }
+      // Split the segment into a pipeline of stages on the `|` token, threading
+      // each stage's stdout into the next stage's stdin.
+      const stages: string[][] = [];
+      let stageAcc: string[] = [];
+      for (const tok of cmd) {
+        if (tok === '|') { stages.push(stageAcc); stageAcc = []; }
+        else stageAcc.push(tok);
       }
+      stages.push(stageAcc);
 
-      let handler = this.commands.get(cmdName!);
-
-      if (!handler) {
-        const resolved = await this.resolveCommand(cmdName!);
-        if (resolved) {
-          // Capability binaries (python/py/pip, wasm tools) are seeded as
-          // regular file nodes carrying metadata.capabilityType; older code
-          // only routed when node.type === 'capability', which auto-installed
-          // bins never are — so python/pip silently ran as empty shell scripts.
-          const isCapability = resolved.type === 'capability'
-            || !!resolved.metadata?.capabilityType;
-          const result = isCapability
-            ? await this.executeCapability(resolved, args)
-            : await this.executeScript(resolved, args);
-
-          lastResult = result || { output: 'Internal execution error', exitCode: 1 };
-          handler = NOOP_HANDLER;
+      if (sep === '&') {
+        // Background the whole pipeline; don't block.
+        (async () => {
+          let pin: string | undefined;
+          for (const st of stages) { if (!st.length) continue; const r = await this.runStage(st, pin); pin = r.output; }
+        })().catch(e => console.error(`Background error: ${e}`));
+        lastResult = { output: `[1] running ${cmd[0]} &`, exitCode: 0 };
+      } else {
+        let pipeIn: string | undefined;
+        let stageResult: CommandResult = { output: '', exitCode: 0 };
+        for (const st of stages) {
+          if (st.length === 0) continue;
+          stageResult = await this.runStage(st, pipeIn);
+          pipeIn = stageResult.output;
         }
-      }
-
-      if (!handler) {
-        lastResult = {
-          output: `killio-os: command not found: ${cmdName}`,
-          exitCode: 127
-        };
-      } else if (handler !== NOOP_HANDLER) {
-        try {
-          if (sep === '&') {
-            handler(args, this).catch(e => console.error(`Background error: ${e}`));
-            lastResult = { output: `[1] running ${cmdName} &`, exitCode: 0 };
-          } else {
-            const result = await handler(args, this);
-            lastResult = result || { output: '', exitCode: 0 };
-          }
-        } catch (error: any) {
-          lastResult = {
-            output: `killio-os: error executing ${cmdName}: ${error.message}`,
-            exitCode: 1
-          };
-        }
+        lastResult = stageResult;
       }
 
       // Process redirection if any
@@ -659,6 +659,51 @@ export class KillioKernel {
       exitCode: lastResult.exitCode,
       metadata: lastResult.metadata
     };
+  }
+
+  /**
+   * Run one pipeline stage: alias expansion, handler / capability / script
+   * resolution, and execution with an optional stdin string. Returns the
+   * command's CommandResult. Used by execute() for each `|`-separated stage.
+   */
+  private async runStage(cmd: string[], stdin?: string): Promise<CommandResult> {
+    let [cmdName, ...args] = cmd;
+
+    // Alias expansion
+    const aliases = this.getEnv('ALIASES');
+    if (aliases && cmdName) {
+      const aliasList = aliases.split(';').filter(Boolean);
+      for (const entry of aliasList) {
+        const [aliasName, ...cmdValueParts] = entry.split('=');
+        const cmdValue = cmdValueParts.join('=');
+        if (aliasName === cmdName) {
+          const expanded = cmdValue.split(' ');
+          cmdName = expanded[0]!;
+          args = [...expanded.slice(1), ...args];
+          break;
+        }
+      }
+    }
+
+    const handler = this.commands.get(cmdName!);
+    if (handler) {
+      try {
+        return (await handler(args, this, stdin)) || { output: '', exitCode: 0 };
+      } catch (error: any) {
+        return { output: `killio-os: error executing ${cmdName}: ${error.message}`, exitCode: 1 };
+      }
+    }
+
+    const resolved = await this.resolveCommand(cmdName!);
+    if (resolved) {
+      const isCapability = resolved.type === 'capability' || !!resolved.metadata?.capabilityType;
+      const result = isCapability
+        ? await this.executeCapability(resolved, args)
+        : await this.executeScript(resolved, args);
+      return result || { output: 'Internal execution error', exitCode: 1 };
+    }
+
+    return { output: `killio-os: command not found: ${cmdName}`, exitCode: 127 };
   }
 
   getBootTime(): number {

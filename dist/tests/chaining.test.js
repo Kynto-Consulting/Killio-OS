@@ -41,6 +41,7 @@ async function testChaining() {
         console.log('❌ || test failed');
     }
     console.log('\n--- Testing head and tail ---');
+    await kernel.execute(['cd', '/home/agent']); // root '/' is read-only; write in HOME
     await kernel.execute(['write_file', 'test.txt', 'line1\nline2\nline3\nline4\nline5']);
     const res5 = await kernel.execute(['head', '-n', '2', 'test.txt']);
     console.log('Head result:', res5.output);

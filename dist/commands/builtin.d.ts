@@ -1,4 +1,5 @@
 export * from './fs.js';
+export * from './coreutils.js';
 export * from './system.js';
 export * from './utils.js';
 export * from './node.js';

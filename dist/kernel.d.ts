@@ -1,6 +1,6 @@
 import { type VFSProvider } from './vfs/provider.js';
 import { type CommandResult, type FSNode } from './types/index.js';
-export type CommandHandler = (args: string[], kernel: KillioKernel) => Promise<CommandResult>;
+export type CommandHandler = (args: string[], kernel: KillioKernel, stdin?: string) => Promise<CommandResult>;
 export declare class KillioKernel {
     private commands;
     private cwd;
@@ -61,6 +61,12 @@ export declare class KillioKernel {
      */
     private executeHeredoc;
     execute(command: string | string[]): Promise<CommandResult>;
+    /**
+     * Run one pipeline stage: alias expansion, handler / capability / script
+     * resolution, and execution with an optional stdin string. Returns the
+     * command's CommandResult. Used by execute() for each `|`-separated stage.
+     */
+    private runStage;
     getBootTime(): number;
     getHostname(): string;
     setUser(userId: string): Promise<void>;

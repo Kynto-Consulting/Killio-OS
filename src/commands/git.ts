@@ -28,13 +28,32 @@ export const git: CommandHandler = async (args, kernel) => {
       },
       writeFile: async (filepath: string, data: Uint8Array | string, options?: any) => {
         try {
-          const content = typeof data === 'string' ? data : Buffer.from(data).toString('base64');
+          // isomorphic-git hands us a Uint8Array even for text files (e.g. on
+          // checkout/restore). Storing it blindly as base64 makes a restored
+          // text file unreadable to `cat`/`read_file`. Detect lossless UTF-8
+          // and store as text; fall back to base64 only for true binary.
+          let content: string;
+          let isBinary: boolean;
+          if (typeof data === 'string') {
+            content = data;
+            isBinary = false;
+          } else {
+            const buf = Buffer.from(data);
+            const asUtf8 = buf.toString('utf8');
+            if (Buffer.from(asUtf8, 'utf8').equals(buf)) {
+              content = asUtf8;
+              isBinary = false;
+            } else {
+              content = buf.toString('base64');
+              isBinary = true;
+            }
+          }
           let permissions = '644';
           if (options && options.mode) permissions = options.mode.toString(8);
           else if (typeof options === 'number') permissions = options.toString(8);
 
           await kernel.writeFile(filepath, content, {
-            isBinary: typeof data !== 'string',
+            isBinary,
             permissions
           });
         } catch (e: any) {
@@ -153,9 +172,6 @@ export const git: CommandHandler = async (args, kernel) => {
         return { output: '', exitCode: 0 };
       }
       case 'checkout': {
-        const ref = args[1];
-        if (!ref) return { output: 'fatal: branch name or reference required', exitCode: 1 };
-        
         if (args.includes('-b')) {
           const newBranch = args[args.indexOf('-b') + 1];
           if (!newBranch) return { output: 'fatal: branch name required for -b', exitCode: 1 };
@@ -163,8 +179,38 @@ export const git: CommandHandler = async (args, kernel) => {
           await gitApi.checkout({ fs: gitFs, dir, ref: newBranch });
           return { output: `Switched to a new branch '${newBranch}'`, exitCode: 0 };
         }
+
+        // File restore forms:
+        //   git checkout -- <file>          (restore from HEAD)
+        //   git checkout <ref> -- <file>    (restore from <ref>)
+        const dd = args.indexOf('--');
+        if (dd !== -1) {
+          const ref = dd > 1 ? args[1]! : 'HEAD';
+          const files = args.slice(dd + 1);
+          if (files.length === 0) return { output: 'fatal: no paths given to restore', exitCode: 1 };
+          const filepaths = files.map(f => kernel.resolvePath(f).replace(dir + '/', ''));
+          await gitApi.checkout({ fs: gitFs, dir, ref, filepaths, force: true });
+          return { output: '', exitCode: 0 };
+        }
+
+        const ref = args[1];
+        if (!ref) return { output: 'fatal: branch name or reference required', exitCode: 1 };
         await gitApi.checkout({ fs: gitFs, dir, ref });
         return { output: `Switched to branch '${ref}'`, exitCode: 0 };
+      }
+      case 'restore': {
+        // git restore <file>... | .  — restore working-tree file(s) from HEAD
+        const files = args.slice(1).filter(a => !a.startsWith('-'));
+        if (files.length === 0) return { output: 'fatal: no paths given to restore', exitCode: 1 };
+        let filepaths: string[];
+        if (files.length === 1 && (files[0] === '.' || files[0] === kernel.getCWD())) {
+          // Restore all tracked files (whole-tree checkout from HEAD).
+          filepaths = (await gitApi.statusMatrix({ fs: gitFs, dir })).map(row => row[0] as string);
+        } else {
+          filepaths = files.map(f => kernel.resolvePath(f).replace(dir + '/', ''));
+        }
+        await gitApi.checkout({ fs: gitFs, dir, ref: 'HEAD', filepaths, force: true });
+        return { output: '', exitCode: 0 };
       }
       case 'add': {
         if (!args[1]) return { output: 'nothing specified, nothing added.', exitCode: 0 };

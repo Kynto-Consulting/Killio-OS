@@ -21,7 +21,7 @@ async function runTest() {
         { cmd: ['ls'], expected: (out) => out.includes('backup.txt') },
         { cmd: ['mv', 'backup.txt', 'old_notes.txt'], expected: '' },
         { cmd: ['ls'], expected: (out) => !out.includes('backup.txt') && out.includes('old_notes.txt') },
-        { cmd: ['grep', 'Killio'], expected: (out) => out.includes('Hello Killio OS!') },
+        { cmd: ['grep', 'Killio', 'notes.txt'], expected: (out) => out.includes('Hello Killio OS!') },
         { cmd: ['echo', 'Final', 'Test'], expected: 'Final Test' },
         { cmd: ['history'], expected: (out) => out.includes('whoami') && out.includes('history') },
         { cmd: ['rm', 'old_notes.txt'], expected: '' },
